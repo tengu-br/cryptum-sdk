@@ -1,5 +1,6 @@
 const metaplex = require('@metaplex/js');
 const solanaWeb3 = require('@solana/web3.js');
+const BN = require('bn.js');
 
 const MAX_RETRIES = 48
 
@@ -108,7 +109,7 @@ const SAFETY_DEPOSIT_BOX_SCHEMA = new Map([
         ['length', 'u64'],
       ],
     },
-  ]
+  ],
 ]);
 
 class SetAuthorityArgs {
@@ -134,6 +135,18 @@ class SetWhitelistedCreatorArgs {
   }
 }
 
+class EmptyPaymentAccountArgs {
+  instruction = 7;
+  winningConfigIndex;
+  winningConfigItemIndex;
+  creatorIndex;
+  constructor(args) {
+    this.winningConfigIndex = args.winningConfigIndex;
+    this.winningConfigItemIndex = args.winningConfigItemIndex;
+    this.creatorIndex = args.creatorIndex;
+  }
+}
+
 const AUCTION_SCHEMA = new Map([
   [
     SetAuthorityArgs,
@@ -143,6 +156,21 @@ const AUCTION_SCHEMA = new Map([
     },
   ]
 ]);
+
+const EMPTY_PAYMENT_ACCOUNT_SCHEMA = new Map([
+  [
+    EmptyPaymentAccountArgs,
+    {
+      kind: 'struct',
+      fields: [
+        ['instruction', 'u8'],
+        ['winningConfigIndex', { kind: 'option', type: 'u8' }],
+        ['winningConfigItemIndex', { kind: 'option', type: 'u8' }],
+        ['creatorIndex', { kind: 'option', type: 'u8' }],
+      ],
+    },
+  ]
+])
 
 const WHITELIST_CREATOR_SCHEMA = new Map([
   [
@@ -178,6 +206,9 @@ module.exports = {
   SetWhitelistedCreatorArgs,
   ValidateSafetyDepositBoxV2Args,
   WHITELIST_CREATOR_SCHEMA,
+  ParticipationConfigV2,
+  EmptyPaymentAccountArgs,
+  EMPTY_PAYMENT_ACCOUNT_SCHEMA,
   toPublicKey,
   metaplexConfirm
 }

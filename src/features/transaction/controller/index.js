@@ -35,7 +35,7 @@ const {
   buildEthereumSmartContractDeployTransaction,
 } = require('../../../services/blockchain/ethereum')
 const {
-  buildSolanaTransferTransaction, deploySolanaToken, deploySolanaNFT, mintEdition, buildSolanaTokenBurnTransaction, updateMetaplexMetadata, buildSolanaCustomProgramInteraction, mintSolanaToken, updateAuctionAuthority, updateVaultAuthority, validateAuction, whitelistCreators,
+  buildSolanaTransferTransaction, deploySolanaToken, deploySolanaNFT, mintEdition, buildSolanaTokenBurnTransaction, updateMetaplexMetadata, buildSolanaCustomProgramInteraction, mintSolanaToken, updateAuctionAuthority, updateVaultAuthority, validateAuction, whitelistCreators, emptyPaymentAccount,
 } = require('../../../services/blockchain/solana')
 const { buildBitcoinTransferTransaction } = require('../../../services/blockchain/bitcoin')
 const WalletController = require('../../wallet/controller')
@@ -1343,6 +1343,30 @@ class Controller extends Interface {
 
     return new TransactionResponse({ hash: txHash })
   }
+
+  /**
+     * Create Solana update auction authority transaction
+     *
+     * @param {import('../entity').TransferTransactionInput} input
+     * @returns {Promise<TransactionResponse>} signed transaction data
+     */
+  async solanaEmptyPaymentAccountTransaction(input) {
+    // validateSolanaTransferTransaction(input)
+    const { testnet, from, auction, store, creatorIndex, creatorAddress } = input
+    const protocol = Protocol.SOLANA
+
+    const apiRequest = getApiMethod({
+      requests,
+      key: 'getBlock',
+      config: this.config,
+    })
+    const latestBlock = (await apiRequest(`${requests.getBlock.url}/latest?protocol=${protocol}`)).data.blockhash
+
+    const txHash = await emptyPaymentAccount({ from, auction, store, creatorIndex, creatorAddress, testnet: testnet !== undefined ? testnet : this.config.environment === 'development', latestBlock })
+
+    return new TransactionResponse({ hash: txHash })
+  }
+
 
   /**
    * Create Solana update token vault authority transaction
