@@ -19,8 +19,13 @@ const {
   INSTANT_SALE_SCHEMA,
   EMPTY_PAYMENT_ACCOUNT_SCHEMA,
   metaplexConfirm,
+  sleep,
   toPublicKey,
-  ParticipationConfigV2 } = require('./consts')
+  ParticipationConfigV2,
+  CreateMint,
+  CreateAssociatedTokenAccount,
+  MintTo
+} = require('./consts')
 
 module.exports.buildSolanaTransferTransaction = async function ({
   from,
@@ -129,10 +134,7 @@ module.exports.deploySolanaToken = async function ({ from, to = from.publicKey, 
 
 module.exports.mintSolanaToken = async function ({ from, to = from.publicKey, token, amount, latestBlock, testnet = true }) {
   const network = testnet ? 'devnet' : 'mainnet-beta'
-  const connection = new solanaWeb3.Connection(
-    solanaWeb3.clusterApiUrl(network),
-    'confirmed',
-  );
+  const connection = new solanaWeb3.Connection(network, 'confirmed',);
 
   const fromAccount = solanaWeb3.Keypair.fromSecretKey(bs58.decode(from.privateKey))
   const toAccount = toPublicKey(to)
@@ -171,19 +173,155 @@ module.exports.mintSolanaToken = async function ({ from, to = from.publicKey, to
   return rawTransaction
 }
 
-module.exports.deploySolanaNFT = async function ({ from, maxSupply, uri, testnet = true }) {
+module.exports.deploySolanaCollection = async function ({ from, name, symbol, uri, testnet = true }) {
   const network = testnet ? 'devnet' : 'mainnet-beta'
   const connection = new metaplex.Connection(network)
   const wallet = new metaplex.NodeWallet(solanaWeb3.Keypair.fromSecretKey(bs58.decode(from.privateKey)))
 
-  const mintResponse = await metaplex.actions.mintNFT({
-    connection,
-    wallet,
-    uri,
-    maxSupply,
+  const mint = solanaWeb3.Keypair.generate();
+  const mintRent = await connection.getMinimumBalanceForRentExemption(splToken.MintLayout.span);
+
+  const createMintTx = new CreateMint({ feePayer: toPublicKey(wallet.publicKey) }, {
+    newAccountPubkey: mint.publicKey,
+    lamports: mintRent,
+  });
+  const recipient = await splToken.Token.getAssociatedTokenAddress(splToken.ASSOCIATED_TOKEN_PROGRAM_ID, splToken.TOKEN_PROGRAM_ID, mint.publicKey, toPublicKey(wallet.publicKey));
+
+  const createAssociatedTokenAccountTx = new CreateAssociatedTokenAccount({ feePayer: toPublicKey(wallet.publicKey) }, {
+    associatedTokenAddress: recipient,
+    splTokenMintAddress: mint.publicKey,
   });
 
-  return { ...mintResponse }
+  const mintToTx = new MintTo({ feePayer: toPublicKey(wallet.publicKey) }, {
+    mint: mint.publicKey,
+    dest: recipient,
+    amount: 1,
+  });
+
+  const metadataPDA = await metaplex.programs.metadata.Metadata.getPDA(mint.publicKey);
+  const createMetadataTx = new metaplex.programs.metadata.CreateMetadataV2({ feePayer: toPublicKey(wallet.publicKey) }, {
+    metadata: metadataPDA,
+    metadataData: new metaplex.programs.metadata.DataV2({
+      name,
+      symbol,
+      uri,
+      sellerFeeBasisPoints: 0,
+      creators: null,
+      collection: null,
+      uses: null,
+    }),
+    updateAuthority: toPublicKey(wallet.publicKey),
+    mint: mint.publicKey,
+    mintAuthority: toPublicKey(wallet.publicKey),
+  })
+
+  let tx = metaplex.programs.core.Transaction.fromCombined([
+    createMintTx,
+    createMetadataTx,
+    createAssociatedTokenAccountTx,
+    mintToTx,
+  ], { feePayer: wallet.publicKey });
+  tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
+  tx.partialSign(mint);
+  tx = await wallet.signTransaction(tx);
+
+  let txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+
+  return { txHash: txHash, collection: mint.publicKey.toBase58() }
+
+}
+
+module.exports.deploySolanaNFT = async function ({ from, maxSupply, uri, name, symbol, creators = null, royaltiesFee = 0, collection = null, testnet = true }) {
+  const network = testnet ? 'devnet' : 'mainnet-beta'
+  const connection = new metaplex.Connection(network)
+  const wallet = new metaplex.NodeWallet(solanaWeb3.Keypair.fromSecretKey(bs58.decode(from.privateKey)))
+
+  const nftMint = solanaWeb3.Keypair.generate();
+  const mintRent = await connection.getMinimumBalanceForRentExemption(splToken.MintLayout.span);
+
+  // Creates mint
+  const createNftMintTx = new CreateMint({ feePayer: toPublicKey(wallet.publicKey) }, {
+    newAccountPubkey: nftMint.publicKey,
+    lamports: mintRent,
+  });
+  const nftRecipient = await splToken.Token.getAssociatedTokenAddress(splToken.ASSOCIATED_TOKEN_PROGRAM_ID, splToken.TOKEN_PROGRAM_ID, nftMint.publicKey, toPublicKey(wallet.publicKey));
+
+  // Create mint's recipient account
+  const createAssociatedNftTokenAccountTx = new CreateAssociatedTokenAccount({ feePayer: toPublicKey(wallet.publicKey) }, {
+    associatedTokenAddress: nftRecipient,
+    splTokenMintAddress: nftMint.publicKey,
+  });
+
+  // Actually mints
+  const mintNftToTx = new MintTo({ feePayer: toPublicKey(wallet.publicKey) }, {
+    mint: nftMint.publicKey,
+    dest: nftRecipient,
+    amount: 1,
+  });
+
+  let parsedCreators = []
+  if (creators) {
+    creators.forEach(creator => {
+      parsedCreators.push(
+        new metaplex.programs.metadata.Creator({
+          address: creator.address,
+          share: creator.share,
+          verified: creator.verified,
+        })
+      )
+    });
+  }
+
+  // Creates metadata
+  const nftMetadataPDA = await metaplex.programs.metadata.Metadata.getPDA(nftMint.publicKey);
+  const createNftMetadataTx = new metaplex.programs.metadata.CreateMetadataV2({ feePayer: toPublicKey(wallet.publicKey) }, {
+    metadata: nftMetadataPDA,
+    metadataData: new metaplex.programs.metadata.DataV2({
+      name,
+      symbol,
+      uri,
+      sellerFeeBasisPoints: royaltiesFee * 10,
+      creators: creators ? parsedCreators : null,
+      collection: collection ? new metaplex.programs.metadata.Collection({
+        key: collection,
+        verified: false,
+      }) : null,
+      uses: null,
+    }),
+    updateAuthority: toPublicKey(wallet.publicKey),
+    mint: nftMint.publicKey,
+    mintAuthority: toPublicKey(wallet.publicKey),
+  })
+
+  const editionPDA = await metaplex.programs.metadata.MasterEdition.getPDA(nftMint.publicKey);
+
+  // Creates Master Edition info
+  const masterEditionTx = new metaplex.programs.metadata.CreateMasterEditionV3({ feePayer: toPublicKey(wallet.publicKey) }, {
+    edition: editionPDA,
+    metadata: nftMetadataPDA,
+    updateAuthority: toPublicKey(wallet.publicKey),
+    mint: nftMint.publicKey,
+    mintAuthority: toPublicKey(wallet.publicKey),
+    maxSupply: new BN(maxSupply),
+  });
+
+
+  let tx = metaplex.programs.core.Transaction.fromCombined([
+    createNftMintTx,
+    createNftMetadataTx,
+    createAssociatedNftTokenAccountTx,
+    mintNftToTx,
+    masterEditionTx
+  ], { feePayer: wallet.publicKey });
+  tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
+  tx.partialSign(nftMint);
+  tx = await wallet.signTransaction(tx);
+
+  let txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+
+  return { txHash, mint: nftMint.publicKey.toBase58(), metadata: nftMetadataPDA.toBase58() }
 }
 
 module.exports.mintEdition = async function ({ masterEdition, from, testnet = true }) {
@@ -542,10 +680,10 @@ module.exports.updateVaultAuthority = async function ({ testnet, from, vault, au
   return tx
 }
 
-module.exports.whitelistCreators = async function ({ testnet, from, uri, store, latestBlock }) {
+module.exports.whitelistCreators = async function ({ testnet, from, uri, mint, store, latestBlock }) {
   const network = testnet ? 'devnet' : 'mainnet-beta'
   const connection = new metaplex.Connection(network, "confirmed")
-  const creators = (await axios.get(uri)).data.properties.creators
+  const creators = (await metaplex.programs.metadata.Metadata.findByMint(connection, mint)).data.data.creators
   const fromAccount = solanaWeb3.Keypair.fromSecretKey(bs58.decode(from.privateKey))
   const metaplexProgramId = 'p1exdMJcjVao65QdewkaZRUnU6VPSXhus9n2GzWfh98';
 
@@ -1034,7 +1172,6 @@ module.exports.createInstantSaleAuction = async function ({ testnet, from, price
   const connection = new metaplex.Connection(network, "confirmed")
   const wallet = new metaplex.NodeWallet(solanaWeb3.Keypair.fromSecretKey(bs58.decode(from.privateKey)))
   const auctionSettings = {
-    // 1 or 7?
     instruction: 7,
     tickSize: null,
     auctionGap: null,
@@ -1065,6 +1202,25 @@ module.exports.createInstantSaleAuction = async function ({ testnet, from, price
     auction: auctionKey
   }
 }
+
+async function sendSolanaTxWithRetry(func, params, tries = 0) {
+  if (tries > 20)
+    throw new Error("Maximum retries attempted");
+  try {
+    let attemptedTxResponse = await func(params)
+    return attemptedTxResponse
+  } catch (error) {
+    if (error instanceof Error) {
+      console.log(error)
+      await sleep(1000)
+      return await sendSolanaTxWithRetry(func, params, tries + 1)
+    } else {
+      throw error
+    }
+  }
+}
+
+module.exports.sendSolanaTxWithRetry = sendSolanaTxWithRetry
 
 module.exports.listAuctions = async function ({ testnet, authority }) {
   const network = testnet ? 'devnet' : 'mainnet-beta'
